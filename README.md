@@ -12,6 +12,7 @@
 - 背面依据 **长边 / 短边翻转** 执行坐标变换，保证裁切折叠后的阅读顺序；
 - 可选 **爬移补偿（creep compensation）**：按纸张厚度由外向内平移内层页位，画布叠加原始页位虚线框与补偿后实线框，每个页位（含空白页）输出 `offsetMm`；均衡分帖下按**各帖实际层数**独立重算；
 - 可选 **纸张规格与出血 / 安全区适配检查**：输入纸张宽高、成品页宽高、出血与安全边距后，按每个正反页位的实际方向计算可用矩形，逐页位判定成品页是否放得下、出血是否落在纸张内、安全边距是否过大，并在逐张预览与清单中标出不合格页位；
+- 可选 **双面生产标记**：启用适配检查后可勾选，为每张纸正、背面生成**裁切线**（四个成品页外角各两段）、**折线标**（中线上下两端）与**套准十字**（左右出血框外侧，每侧按「居中 → 1/4 → 3/4」固定候选位置顺序尝试）；线段只有**完整落在纸内、避开两侧出血框且不与同面已放置标记相交**才落位，无可用位置则**省略并逐候选返回原因**；背面标记由正面按长边 / 短边翻转做**同一物理位置的坐标变换**，保证正背套准，爬移变化后同步重算；
 - 可选 **试印核验**：对照实物纸张录入 1～12 条观察（帖 / 张 / 正背面 / 左右页位 / 看到的页码或空白 / 内容朝向），服务端用同一输入重算「左/右装订 × 长/短边翻转」四种设置逐条比对，仅唯一零差异组合判定验证通过，并列最优时返回无法判定及并列组合；**无法判定时自动从尚未观察的页位计算「下一处观察建议」**（含定位与各候选预期值）；
 - 画布**逐张显示**纸面、页码、空白页位与翻转方向示意；
 - 一键**导出拼版清单 JSON**（包含适配检查与试印核验结果）。
@@ -128,6 +129,90 @@ npm test           # 运行拼版逻辑单元测试
 
 每个页位（含空白页）输出 `fit`：`{ ok, rotation, rect, trim, bleedBox, safeBox, violations }`，`violations` 逐条给出超限原因（`page-too-wide` / `page-too-tall` / `bleed-overflow-{left,top,right,bottom}` / `safety-too-wide` / `safety-too-tall`，含具体超出量）；顶层 `fit` 汇总 `ok / totalSlots / failCount`。画布上蓝框 = 裁切线、绿/红虚框 = 出血范围（红 = 超出纸张）、灰点框 = 安全区，不合格页位带红色圆徽，清单对应单元格标红并列出原因。
 
+### 双面生产标记（duplex production marks）
+
+勾选表单中的「双面生产标记」（API 传 `productionMarks: true`，可用 `markSizeMm` 指定尺寸，缺省 5mm、最大 100mm）后启用；**必须先启用适配检查**（标记坐标取自 `trim` / `bleedBox`），未提供纸张与成品页尺寸时勾选会返回 400。缺省 / 不传 / 传 `false` 时结果与旧版本完全一致（不带任何标记字段）。
+
+每张纸的正、背面各放置三类标记（均为水平 / 竖直线段，纸张坐标系 mm）：
+
+- **裁切线 `crop`**：四个成品页外角（左页位左上 / 左下、右页位右上 / 右下），每角一段水平线（`crop-{tl,tr,br,bl}-h`）与一段竖直线（`-v`），共 8 条；起点在出血框外固定间隙 2mm 处，向最近的纸边方向延伸 `markSizeMm`；
+- **折线标 `fold`**：纸张中线（折线 / 订口）上、下两端各一段自纸边向内的竖线（`fold-top` / `fold-bottom`）；
+- **套准十字 `register`**：左、右两侧出血框外各一个十字（一横一竖两条线段），十字中心在出血框外 2mm；每侧按固定候选位置顺序 **① 出血框垂直居中 → ② 四分之一高度 → ③ 四分之三高度** 依次尝试，第一条候选的两条线段全部合法才落位（输出 `position` 1/2/3）。
+
+落位规则（按候选位置固定顺序尝试，输出唯一确定）：
+
+1. 每条线段必须**完整落在纸张矩形内**（端点可贴纸张边缘），否则该候选记 `segment-outside-paper`；
+2. 线段不得与本面两侧出血框**正长度相交**（仅端点 / 边界相接不算），否则记 `segment-hits-bleed-box`；
+3. 线段不得与同一面**已放置标记**相交（放置顺序：裁切线左上 → 右上 → 右下 → 左下，每角先水平后竖直 → 折线标上 → 下 → 套准十字左 → 右），否则记 `segment-hits-mark`。
+
+同一面放置顺序固定为：裁切线 → 折线标 → 套准十字；一个标记的全部候选位置都不可用时**省略**该标记，并在 `omitted` 中逐候选返回 `attempts`（位置编号、是否可用、逐线段原因代码与说明）、`reasonCode`（最后一个候选的首条原因）、`reasonSummary` 与完整 `reason`。
+
+**正背套准（背面坐标变换）**：背面不在背面视角独立排版，而是对正面已放置标记的每条线段按翻转方式做同一物理位置的坐标变换——
+
+- 长边翻转：`(x, y) → (x, H − y)`（绕水平长边翻转）；
+- 短边翻转：`(x, y) → (W − x, y)`（绕垂直短边翻转）。
+
+因此正、背面标记在纸张上的物理位置完全重合（翻面后对齐套准）；正面因无可用位置省略的标记，背面在同一物理位置**同步省略**（`reasonCode: 'paired-front-omitted'`，`pairedWith` 指向正面同名标记）。标记坐标取自含爬移偏移的 `trim` / `bleedBox`，**纸张尺寸、出血或爬移参数变化时所有标记在同一次重算中同步重算**。
+
+前端画布按纸张 mm 等比绘制全部已放置标记：黑色实线 = 裁切线、玫红虚线 = 折线标、青色 = 套准十字；逐张在画布下方与清单「备注」列给出省略提示（悬停查看逐候选原因），张导航标注「省略标记 N」；导出 JSON 包含每个标记的线段坐标与省略原因。空白页纸张同样生成标记。
+
+`productionMarks` 段示例（每张纸 `sheet.productionMarks`，节选）：
+
+```json
+{
+  "front": {
+    "placed": [
+      {
+        "id": "crop-tl-h",
+        "type": "crop",
+        "label": "左上角水平裁切线",
+        "position": 0,
+        "positionLabel": "左上角（固定位置）",
+        "side": "front",
+        "segments": [{ "x1": 5, "y1": 16.5, "x2": 0, "y2": 16.5 }]
+      },
+      {
+        "id": "register-left",
+        "type": "register",
+        "label": "左侧套准十字",
+        "position": 1,
+        "positionLabel": "出血框垂直居中",
+        "side": "front",
+        "segments": [
+          { "x1": 5, "y1": 165, "x2": 0, "y2": 165 },
+          { "x1": 5, "y1": 162.5, "x2": 5, "y2": 167.5 }
+        ]
+      }
+    ],
+    "omitted": [
+      {
+        "id": "register-right",
+        "type": "register",
+        "label": "右侧套准十字",
+        "side": "front",
+        "reasonCode": "segment-outside-paper",
+        "reasonSummary": "线段超出纸张边界（标记无法完整落在纸内）",
+        "reason": "候选位置 1「出血框垂直居中」：线段超出纸张边界… ｜ 候选位置 2… ｜ 候选位置 3…",
+        "attempts": [
+          { "position": 1, "positionLabel": "出血框垂直居中", "ok": false,
+            "checks": [{ "segmentIndex": 0, "code": "segment-outside-paper", "message": "线段超出纸张边界（标记无法完整落在纸内）" }] }
+        ]
+      }
+    ]
+  },
+  "back": {
+    "placed": [
+      { "id": "register-left", "type": "register", "side": "back", "pairedWith": "register-left",
+        "transform": { "flip": "short", "mapping": "(x, y) -> (W - x, y)" },
+        "segments": [{ "x1": 455, "y1": 165, "x2": 460, "y2": 165 }, { "x1": 455, "y1": 162.5, "x2": 455, "y2": 167.5 }] }
+    ],
+    "omitted": []
+  }
+}
+```
+
+顶层 `productionMarks` 汇总：`{ enabled, markSizeMm, gapMm, paperWidth, paperHeight, flip, transform, placedCount, omittedCount, sheets[] }`，其中 `sheets[]` 逐张给出正 / 背面的 `placedCount` / `omittedCount`；未启用时仅为 `{ "enabled": false }`。
+
 ### 试印核验（trial print verification）
 
 生成拼版后，可在逐张预览旁对照实物纸张录入 **1～12 条观察**：帖、张、正/背面、左/右页位、看到的页码（或空白）以及内容朝向（正向 / 倒置 180°）。点击「开始核验」（已核验过时增删观察会自动重核）后，服务端用**同一输入**分别重算「左/右装订 × 长/短边翻转」四种设置，逐条比对：
@@ -180,6 +265,8 @@ npm test           # 运行拼版逻辑单元测试
   "pageHeight": 297,
   "bleedMm": 3,
   "safetyMm": 5,
+  "productionMarks": true,
+  "markSizeMm": 5,
   "observations": [
     { "signature": 1, "sheet": 1, "side": "front", "position": "right", "page": 1, "orientation": "upright" },
     { "signature": 1, "sheet": 1, "side": "back", "position": "left", "page": null, "orientation": "upright" }
@@ -198,6 +285,8 @@ npm test           # 运行拼版逻辑单元测试
 - `maxCompensation`：**可选**，爬移最大补偿量（mm，≥ 0，缺省为 0）
 - `paperWidth` / `paperHeight` / `pageWidth` / `pageHeight`：**可选**，纸张与成品页宽高（mm）；全部缺省或为 0 时不做适配检查，提供任意一项则四项必须全部 > 0
 - `bleedMm` / `safetyMm`：**可选**，出血与安全边距（mm，≥ 0，缺省为 0）
+- `productionMarks`：**可选**，`true` 启用双面生产标记（缺省 / `false` 不启用，结果与旧版本完全一致）；启用时必须已提供四项尺寸开启适配检查，否则返回 400
+- `markSizeMm`：**可选**，生产标记尺寸（mm，> 0 且 ≤ 100，缺省 5；仅启用生产标记时校验，空串 / `null` 取缺省值）
 - `observations`：**可选**，试印核验观察数组（1～12 条；缺省 / 空数组不启用核验，结果与旧版本完全一致）。每条：
   - `signature` / `sheet`：帖号 / 张号（1 起始整数；张号不超过该帖实际张数）
   - `side`：`front`（正面）/ `back`（背面）；`position`：`left`（左页位）/ `right`（右页位）
@@ -308,6 +397,8 @@ npm test           # 运行拼版逻辑单元测试
 
 顶层 `fit` 汇总：`{ enabled, paperWidth, paperHeight, pageWidth, pageHeight, bleedMm, safetyMm, slotWidth, slotHeight, ok, totalSlots, failCount }`；未启用时仅为 `{ "enabled": false }`。
 
+启用双面生产标记时，每张纸对象增加 `productionMarks`：`front` / `back` 各含 `placed[]`（已落位标记：`id` / `type`（`crop` / `fold` / `register`）/ `label` / `position` / `positionLabel` / `side` / `segments[]`（`{x1,y1,x2,y2}`，纸张坐标系 mm）；背面标记另带 `pairedWith` 与 `transform`）与 `omitted[]`（省略标记：`reasonCode` / `reasonSummary` / 完整 `reason` 与逐候选 `attempts`；背面省略记 `paired-front-omitted`）。顶层 `productionMarks` 汇总尺寸、间隙、正背变换与放置 / 省略计数（结构与示例见上文「双面生产标记」一节）；未启用时仅为 `{ "enabled": false }`，纸张对象不带 `productionMarks` 字段。
+
 启用试印核验时，顶层增加 `verification`：
 
 - `observations`：规范化后的观察（含 1 起始序号 `index`）；
@@ -317,21 +408,45 @@ npm test           # 运行拼版逻辑单元测试
 
 未启用核验时 `verification` 仅为 `{ "enabled": false }`。
 
-参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法等情况）。另提供 `GET /api/health` 健康检查。
+参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法，`productionMarks` 非布尔值、未启用适配检查就开启生产标记、`markSizeMm` 非正数或超过 100mm 等情况）。另提供 `GET /api/health` 健康检查。
+
+调用示例（生成带双面生产标记的拼版清单，460×330 纸张放 210×297 成品页，短边翻转）：
+
+```bash
+curl -s -X POST http://localhost:8080/api/impose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "totalPages": 8,
+    "sheetsPerSignature": 2,
+    "binding": "left",
+    "flip": "short",
+    "paperWidth": 460,
+    "paperHeight": 330,
+    "pageWidth": 210,
+    "pageHeight": 297,
+    "bleedMm": 3,
+    "safetyMm": 5,
+    "productionMarks": true,
+    "markSizeMm": 5
+  }' | jq '.productionMarks | { enabled, markSizeMm, placedCount, omittedCount }'
+# => { "enabled": true, "markSizeMm": 5, "placedCount": 48, "omittedCount": 0 }
+```
 
 ## 目录结构
 
 ```
 ├── server.js            # Express 服务：静态页面 + /api/impose
-├── src/imposition.js    # 拼版计算核心（固定 / 均衡 / 章节优先分帖、正反面页位、翻转坐标变换、爬移补偿 offsetMm）
-├── src/fitCheck.js      # 纸张规格与出血 / 安全区适配检查（可用矩形、trim/bleed/safe、超限原因）
-├── src/verification.js  # 试印核验（观察校验、四种装订×翻转重算比对、候选排序与结论）
-├── public/              # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、试印核验面板、JSON 导出）
+├── src/imposition.js      # 拼版计算核心（固定 / 均衡 / 章节优先分帖、正反面页位、翻转坐标变换、爬移补偿 offsetMm）
+├── src/fitCheck.js        # 纸张规格与出血 / 安全区适配检查（可用矩形、trim/bleed/safe、超限原因）
+├── src/productionMarks.js # 双面生产标记（裁切线 / 折线标 / 套准十字候选落位、正背坐标变换、省略原因）
+├── src/verification.js    # 试印核验（观察校验、四种装订×翻转重算比对、候选排序与结论）
+├── public/                # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、生产标记、试印核验面板、JSON 导出）
 │   ├── index.html
 │   ├── app.js
 │   └── style.css
 ├── test/imposition.test.js
 ├── test/fitCheck.test.js
+├── test/productionMarks.test.js
 ├── test/chapterSplit.test.js
 ├── test/verification.test.js
 ├── test/api.test.js

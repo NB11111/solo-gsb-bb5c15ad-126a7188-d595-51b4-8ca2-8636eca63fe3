@@ -1,6 +1,7 @@
 'use strict';
 
 const { parseFitInput, attachFit } = require('./fitCheck');
+const { parseProductionMarksInput, attachProductionMarks } = require('./productionMarks');
 const { attachVerification } = require('./verification');
 
 /**
@@ -53,6 +54,18 @@ const { attachVerification } = require('./verification');
  *   帖/张/左→右 顺序」计算唯一的下一处观察建议（无页位可区分时明确为 null）。
  * - 非法索引、重复观察返回明确错误；无观察（缺省 / 空数组）时 verification 为
  *   { enabled: false }，原流程完全不变。
+ *
+ * 双面生产标记（duplex production marks）：
+ * - 仅在启用适配检查后可启用（productionMarks = true，可选 markSizeMm 指定尺寸）；
+ *   为每张纸正、背面生成裁切线（8 条外角线段）、折线标（中线上下各 1 条）与
+ *   套准十字（左右两侧，每侧按「居中 → 1/4 → 3/4」固定候选顺序尝试）。
+ * - 每个标记的线段须完整落在纸内、避开两侧出血框且不与同面已放置标记相交，
+ *   按候选顺序取首个全部合法的位置；全部候选不可用则省略并逐候选返回原因。
+ * - 背面标记由正面标记逐线段按长边（x,y->x,H-y）/ 短边（x,y->W-x,y）翻转
+ *   做同一物理位置的坐标变换，保证正背套准；正面省略的标记背面同步省略。
+ * - 标记坐标取自 trim / bleedBox（含爬移偏移），纸张尺寸或爬移参数变化时
+ *   在同一次重算中同步重算。未启用（缺省 / false）时不带任何标记字段，
+ *   现有响应完全不变。
  */
 
 const MAX_TOTAL_PAGES = 10000;
@@ -217,7 +230,10 @@ function planChapterSignatures(totalPages, maxSheets, starts) {
  * @param {boolean} [input.chapterSplit]    是否启用章节优先分帖（缺省 false；与均衡分帖互斥）
  * @param {Array<number>} [input.chapterStarts] 章节起始页（严格递增，启用章节优先分帖时必填）
  * @param {Array<object>} [input.observations] 试印核验观察（1～12 条；缺省 / 空数组不启用核验）
+ * @param {boolean} [input.productionMarks] 是否启用双面生产标记（缺省 false；启用时必须已提供四项尺寸开启适配检查）
+ * @param {number} [input.markSizeMm] 生产标记尺寸（mm，>0 且 ≤100，缺省 5；仅启用生产标记时校验）
  * @returns {object} 拼版结果（按帖 -> 张 -> 正/背面 -> 左/右页位；启用适配检查时每个页位带 fit；
+ *                   启用双面生产标记时每张纸带 productionMarks、顶层带 productionMarks 汇总；
  *                   启用试印核验时顶层带 verification：观察、候选评分与结论）
  */
 function computeImposition(input) {
@@ -230,6 +246,7 @@ function computeImposition(input) {
   const balancedSplit = input && input.balancedSplit === true;
   const chapterSplit = input && input.chapterSplit === true;
   const fit = parseFitInput(input || {});
+  const productionMarks = parseProductionMarksInput(input || {}, fit.enabled);
 
   if (!Number.isInteger(totalPages) || totalPages < 1 || totalPages > MAX_TOTAL_PAGES) {
     throw new Error(`成品页数必须为 1 ~ ${MAX_TOTAL_PAGES} 的整数`);
@@ -439,7 +456,7 @@ function computeImposition(input) {
   const result = {
     meta: {
       app: 'saddle-stitch-imposition',
-      version: '1.6.0',
+      version: '1.7.0',
       generatedAt: new Date().toISOString(),
     },
     input: {
@@ -458,6 +475,8 @@ function computeImposition(input) {
       pageHeight: fit.pageHeight,
       bleedMm: fit.bleedMm,
       safetyMm: fit.safetyMm,
+      productionMarks: productionMarks.enabled,
+      markSizeMm: productionMarks.enabled ? productionMarks.markSizeMm : 0,
     },
     pagesPerSignature: maxPagesPerSignature,
     signatureCount,
@@ -490,6 +509,11 @@ function computeImposition(input) {
   // 纸张规格与出血 / 安全区适配检查：逐页位计算并附加 slot.fit 与顶层 fit 汇总。
   // 未提供纸张 / 成品页尺寸时 fit.enabled = false，页码拼版与爬移结果完全不受影响。
   result.fit = attachFit(result, fit);
+
+  // 双面生产标记：未启用时返回 { enabled: false }，不向 sheet 写入任何字段，
+  // 页码拼版 / 适配检查 / 爬移结果与原流程完全一致；启用后逐张附加
+  // productionMarks（正面放置、背面按翻转做同一物理位置坐标变换）。
+  result.productionMarks = attachProductionMarks(result, productionMarks);
 
   // 试印核验：observations 缺省 / 为空时返回 { enabled: false }，原流程完全不变；
   // 非法索引、重复观察等抛出明确错误（由调用方转为 400）。

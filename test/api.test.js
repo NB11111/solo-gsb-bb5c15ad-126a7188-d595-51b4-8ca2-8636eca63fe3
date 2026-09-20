@@ -238,3 +238,80 @@ test('非法请求仍返回 400（核验流程接入建议计算不影响错误�
     await srv.close();
   }
 });
+
+const FIT_FIELDS = {
+  paperWidth: 460, paperHeight: 330, pageWidth: 210, pageHeight: 297, bleedMm: 3, safetyMm: 5,
+};
+
+test('双面生产标记：响应含顶层汇总与逐张正背面坐标 / 省略结构', async () => {
+  const srv = await startServer();
+  try {
+    const res = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE, ...FIT_FIELDS, productionMarks: true, markSizeMm: 5,
+    });
+    assert.equal(res.status, 200);
+    const pm = res.body.productionMarks;
+    assert.equal(pm.enabled, true);
+    assert.equal(pm.markSizeMm, 5);
+    assert.equal(pm.placedCount, 48); // 2 张 × 2 面 × 12
+    assert.equal(pm.omittedCount, 0);
+    assert.equal(pm.sheets.length, 2);
+    assert.ok(['long', 'short'].includes(pm.flip));
+    const sheetPm = res.body.signatures[0].sheets[0].productionMarks;
+    assert.equal(sheetPm.front.placed.length, 12);
+    assert.deepEqual(sheetPm.front.omitted, []);
+    // 背面标记带正背坐标变换与配对 id，坐标确为线段对象
+    const backReg = sheetPm.back.placed.find((m) => m.id === 'register-left');
+    assert.equal(backReg.pairedWith, 'register-left');
+    assert.equal(backReg.transform.flip, BASE.flip);
+    assert.ok(backReg.segments.every((s) => ['x1', 'y1', 'x2', 'y2'].every((k) => typeof s[k] === 'number')));
+  } finally {
+    await srv.close();
+  }
+});
+
+test('双面生产标记：纸张过小时标记省略并返回逐候选原因', async () => {
+  const srv = await startServer();
+  try {
+    const res = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE, paperWidth: 426, paperHeight: 303, pageWidth: 210, pageHeight: 297, bleedMm: 3,
+      productionMarks: true,
+    });
+    assert.equal(res.status, 200);
+    const pm = res.body.productionMarks;
+    assert.equal(pm.placedCount, 0);
+    assert.ok(pm.omittedCount > 0);
+    const sheetPm = res.body.signatures[0].sheets[0].productionMarks;
+    const reg = sheetPm.front.omitted.find((o) => o.id === 'register-left');
+    assert.equal(reg.attempts.length, 3); // 三个候选垂直位置全部尝试
+    assert.match(reg.reason, /候选位置/);
+    // 背面同步省略并指向正面同名标记
+    const backReg = sheetPm.back.omitted.find((o) => o.id === 'register-left');
+    assert.equal(backReg.reasonCode, 'paired-front-omitted');
+    assert.equal(backReg.pairedWith, 'register-left');
+  } finally {
+    await srv.close();
+  }
+});
+
+test('双面生产标记：未启用适配检查 / 尺寸非法返回 400；缺省参数不启用', async () => {
+  const srv = await startServer();
+  try {
+    const noFit = await postJson(`${srv.baseUrl}/api/impose`, { ...BASE, productionMarks: true });
+    assert.equal(noFit.status, 400);
+    assert.match(noFit.body.error, /必须同时启用纸张适配检查/);
+
+    const badSize = await postJson(`${srv.baseUrl}/api/impose`, {
+      ...BASE, ...FIT_FIELDS, productionMarks: true, markSizeMm: 0,
+    });
+    assert.equal(badSize.status, 400);
+    assert.match(badSize.body.error, /标记尺寸/);
+
+    const off = await postJson(`${srv.baseUrl}/api/impose`, { ...BASE, ...FIT_FIELDS });
+    assert.equal(off.status, 200);
+    assert.deepEqual(off.body.productionMarks, { enabled: false });
+    assert.equal(off.body.signatures[0].sheets[0].productionMarks, undefined);
+  } finally {
+    await srv.close();
+  }
+});

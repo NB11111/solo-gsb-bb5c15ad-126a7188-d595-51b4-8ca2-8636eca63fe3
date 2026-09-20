@@ -398,7 +398,8 @@ function attachVerification(result, rawObservations, recompute) {
   const current = { binding: result.input.binding, flip: result.input.flip };
 
   // 同一输入重算四种「装订 × 翻转」组合；核验只关心页码 / 空白 / 朝向，
-  // 与纸张适配检查无关，重算时关闭适配输入以避免无谓的逐页位检查。
+  // 与纸张适配检查 / 双面生产标记无关，重算时关闭适配输入与生产标记以避免
+  // 无谓的逐页位检查（及「生产标记依赖适配检查」的参数校验）。
   const layouts = new Map();
   const candidates = COMBO_ORDER.map((combo) => {
     const layout = recompute({
@@ -411,6 +412,7 @@ function attachVerification(result, rawObservations, recompute) {
       pageHeight: 0,
       bleedMm: 0,
       safetyMm: 0,
+      productionMarks: false,
     });
     layouts.set(`${combo.binding}/${combo.flip}`, layout);
     return scoreCandidate(combo, layout, observations);
