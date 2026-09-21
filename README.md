@@ -12,9 +12,10 @@
 - 背面依据 **长边 / 短边翻转** 执行坐标变换，保证裁切折叠后的阅读顺序；
 - 可选 **爬移补偿（creep compensation）**：按纸张厚度由外向内平移内层页位，画布叠加原始页位虚线框与补偿后实线框，每个页位（含空白页）输出 `offsetMm`；均衡分帖下按**各帖实际层数**独立重算；
 - 可选 **纸张规格与出血 / 安全区适配检查**：输入纸张宽高、成品页宽高、出血与安全边距后，按每个正反页位的实际方向计算可用矩形，逐页位判定成品页是否放得下、出血是否落在纸张内、安全边距是否过大，并在逐张预览与清单中标出不合格页位；
+- 可选 **双面生产标记**：启用适配检查后为每张纸生成四角裁切线、上下折线标与套准十字；每个标记按固定候选位置顺序尝试，只有线段完整落在纸内、避开两侧出血框且不与已放置标记相交时才落位，无可用位置则省略并返回逐候选原因；背面标记按长边 / 短边翻转做同一物理位置的坐标变换保证正背套准，爬移变化后同步重算；
 - 可选 **试印核验**：对照实物纸张录入 1～12 条观察（帖 / 张 / 正背面 / 左右页位 / 看到的页码或空白 / 内容朝向），服务端用同一输入重算「左/右装订 × 长/短边翻转」四种设置逐条比对，仅唯一零差异组合判定验证通过，并列最优时返回无法判定及并列组合；**无法判定时自动从尚未观察的页位计算「下一处观察建议」**（含定位与各候选预期值）；
-- 画布**逐张显示**纸面、页码、空白页位与翻转方向示意；
-- 一键**导出拼版清单 JSON**（包含适配检查与试印核验结果）。
+- 画布**逐张显示**纸面、页码、空白页位与翻转方向示意（启用适配检查时叠加生产标记，省略标记逐张提示原因）；
+- 一键**导出拼版清单 JSON**（包含适配检查、双面生产标记坐标 / 省略原因与试印核验结果）。
 
 ## 快速开始（Docker）
 
@@ -128,6 +129,71 @@ npm test           # 运行拼版逻辑单元测试
 
 每个页位（含空白页）输出 `fit`：`{ ok, rotation, rect, trim, bleedBox, safeBox, violations }`，`violations` 逐条给出超限原因（`page-too-wide` / `page-too-tall` / `bleed-overflow-{left,top,right,bottom}` / `safety-too-wide` / `safety-too-tall`，含具体超出量）；顶层 `fit` 汇总 `ok / totalSlots / failCount`。画布上蓝框 = 裁切线、绿/红虚框 = 出血范围（红 = 超出纸张）、灰点框 = 安全区，不合格页位带红色圆徽，清单对应单元格标红并列出原因。
 
+### 双面生产标记（production marks）
+
+表单勾选「双面生产标记」（API 传 `productionMarks: true`）后启用；**必须先启用适配检查**（提供纸张与成品页四项尺寸），否则返回 400 明确错误。不勾选 / 不传 / 传 `false` 时顶层 `productionMarks` 仅为 `{ "enabled": false }`，响应与旧版本完全一致。
+
+每张纸（每面）尝试放置 **10 个标记**，按固定顺序排布：四角**裁切线**（`crop-tl/tr/bl/br`，每角两段角线）→ 上 / 下**折线标**（`fold-top/bottom`，以对折中线 `x = W/2` 为中心的水平短线）→ 4 个**套准十字**（`register-1..4`，水平 + 垂直两段）。
+
+- **固定候选位置顺序**：每个标记有固定的候选位置列表——裁切线为「出血框外角标准位 → 沿裁切边向纸内退 1 / 2 个线长」3 个候选；折线标为「出血框外留间隙 → 再外移一个线长 → 贴纸张边」3 个候选；套准十字共享 10 个候选中心（两外角上 / 下排、折线上 / 下方、折线两侧通道）。按顺序逐个尝试，前一个十字已占用的中心会因标记相交自动跳过。
+- **落位三条件（须同时满足）**：
+  1. 标记全部线段**完整落在纸张矩形内**（允许贴边）；
+  2. 线段**不穿入左 / 右两侧出血框**（与出血框边界相贴允许，口径同适配检查）；
+  3. 线段**不与已放置标记相交**（端点相触也算冲突；十字自身两段在中心相触除外）。
+- **省略与原因**：全部候选都不可用时省略该标记，返回 `reasonCode`（汇总：`out-of-paper` / `bleed-overlap` / `mark-overlap`，取走得最远的候选所遇失败）、可读 `reason` 与逐候选 `failures`（每个候选的 `candidateIndex / code / message`）。
+- **正背套准**：正面标记先在纸张坐标系落位；背面不另行排布，而是把正面每段线段做同一物理位置的坐标变换——长边翻转 `(x, y) → (x, H − y)`、短边翻转 `(x, y) → (W − x, y)`，正 / 背面标记一一对应、`id` 相同。候选锚点取自**含爬移偏移** `offsetMm` 的出血框，因此纸张厚度、补偿量、出血、标记尺寸任一变化后标记都随适配检查同步重算。
+- **标记尺寸开关**：`markLengthMm`（线长，mm，缺省 5，启用时必须 > 0）、`markGapMm`（标记与出血框的间隙，mm，缺省 3）；前端提供「小（3 / 2）· 标准（5 / 3）· 大（8 / 4）」三档开关。
+
+输出：每张纸对象增加 `productionMarks`：
+
+```json
+{
+  "placedCount": 10,
+  "omittedCount": 0,
+  "front": [
+    {
+      "id": "crop-tl",
+      "type": "crop",
+      "name": "裁切线（左上）",
+      "candidateIndex": 0,
+      "segments": [
+        { "x1": 10, "y1": 11.5, "x2": 10, "y2": 16.5 },
+        { "x1": 2, "y1": 19.5, "x2": 7, "y2": 19.5 }
+      ]
+    }
+  ],
+  "back": [ /* 同 id，坐标已按长 / 短边翻转 */ ],
+  "omitted": [
+    {
+      "id": "register-1",
+      "type": "register",
+      "name": "套准十字 1",
+      "candidatesTried": 10,
+      "reasonCode": "bleed-overlap",
+      "reason": "全部候选位置要么落在纸张外，要么线段穿入两侧出血框……",
+      "failures": [
+        { "candidateIndex": 0, "code": "out-of-paper", "message": "候选 1：有线段超出纸张范围（纸张 440×310mm）" }
+      ]
+    }
+  ]
+}
+```
+
+顶层 `productionMarks` 汇总：`{ enabled, markLengthMm, markGapMm, paperWidth, paperHeight, flip, sheetCount, totalMarks, placedMarks, omittedMarks, byType: { crop/fold/register: { total, placed, omitted } } }`。
+
+画布上深灰线段 = 裁切线、品红短线 = 折线标、青色十字 = 套准十字（背面画的是变换后的坐标）；有省略时标题栏与纸张下拉给出逐张提示，底部逐条列出省略原因（完整逐候选原因见导出 JSON）。参数示例：
+
+```bash
+curl -X POST http://localhost:8080/api/impose \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "totalPages": 8, "sheetsPerSignature": 2, "binding": "left", "flip": "short",
+    "paperWidth": 472, "paperHeight": 342, "pageWidth": 210, "pageHeight": 297,
+    "bleedMm": 3, "safetyMm": 5,
+    "productionMarks": true, "markLengthMm": 5, "markGapMm": 3
+  }'
+```
+
 ### 试印核验（trial print verification）
 
 生成拼版后，可在逐张预览旁对照实物纸张录入 **1～12 条观察**：帖、张、正/背面、左/右页位、看到的页码（或空白）以及内容朝向（正向 / 倒置 180°）。点击「开始核验」（已核验过时增删观察会自动重核）后，服务端用**同一输入**分别重算「左/右装订 × 长/短边翻转」四种设置，逐条比对：
@@ -180,6 +246,9 @@ npm test           # 运行拼版逻辑单元测试
   "pageHeight": 297,
   "bleedMm": 3,
   "safetyMm": 5,
+  "productionMarks": true,
+  "markLengthMm": 5,
+  "markGapMm": 3,
   "observations": [
     { "signature": 1, "sheet": 1, "side": "front", "position": "right", "page": 1, "orientation": "upright" },
     { "signature": 1, "sheet": 1, "side": "back", "position": "left", "page": null, "orientation": "upright" }
@@ -198,6 +267,8 @@ npm test           # 运行拼版逻辑单元测试
 - `maxCompensation`：**可选**，爬移最大补偿量（mm，≥ 0，缺省为 0）
 - `paperWidth` / `paperHeight` / `pageWidth` / `pageHeight`：**可选**，纸张与成品页宽高（mm）；全部缺省或为 0 时不做适配检查，提供任意一项则四项必须全部 > 0
 - `bleedMm` / `safetyMm`：**可选**，出血与安全边距（mm，≥ 0，缺省为 0）
+- `productionMarks`：**可选**，`true` 启用双面生产标记（须同时启用适配检查，否则 400）；缺省 / `false` 时仅返回 `{ "enabled": false }`，结果与旧版本完全一致
+- `markLengthMm` / `markGapMm`：**可选**，生产标记线长与离出血框间隙（mm，缺省 5 / 3；启用标记时线长必须 > 0，二者均 ≤ 100）。前端尺寸档位：小 3 / 2、标准 5 / 3、大 8 / 4
 - `observations`：**可选**，试印核验观察数组（1～12 条；缺省 / 空数组不启用核验，结果与旧版本完全一致）。每条：
   - `signature` / `sheet`：帖号 / 张号（1 起始整数；张号不超过该帖实际张数）
   - `side`：`front`（正面）/ `back`（背面）；`position`：`left`（左页位）/ `right`（右页位）
@@ -308,6 +379,8 @@ npm test           # 运行拼版逻辑单元测试
 
 顶层 `fit` 汇总：`{ enabled, paperWidth, paperHeight, pageWidth, pageHeight, bleedMm, safetyMm, slotWidth, slotHeight, ok, totalSlots, failCount }`；未启用时仅为 `{ "enabled": false }`。
 
+启用双面生产标记时，每张纸对象增加 `productionMarks`（`front` / `back` 标记线段坐标 + `omitted` 省略原因，结构见上文「双面生产标记」一节），顶层 `productionMarks` 汇总落位 / 省略计数（未启用时仅为 `{ "enabled": false }`）。
+
 启用试印核验时，顶层增加 `verification`：
 
 - `observations`：规范化后的观察（含 1 起始序号 `index`）；
@@ -317,7 +390,7 @@ npm test           # 运行拼版逻辑单元测试
 
 未启用核验时 `verification` 仅为 `{ "enabled": false }`。
 
-参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法等情况）。另提供 `GET /api/health` 健康检查。
+参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` / `chapterSplit` 非布尔值，两种分帖模式同时启用，章节起始页非数组 / 为空 / 非整数 / 重复 / 未递增 / 越界，启用生产标记但未启用适配检查、标记开关非布尔值或线长 / 间隙为负 / 为 0 / 超限，观察记录非数组 / 超过 12 条 / 索引越界 / 重复观察 / 字段非法等情况）。另提供 `GET /api/health` 健康检查。
 
 ## 目录结构
 
@@ -325,16 +398,19 @@ npm test           # 运行拼版逻辑单元测试
 ├── server.js            # Express 服务：静态页面 + /api/impose
 ├── src/imposition.js    # 拼版计算核心（固定 / 均衡 / 章节优先分帖、正反面页位、翻转坐标变换、爬移补偿 offsetMm）
 ├── src/fitCheck.js      # 纸张规格与出血 / 安全区适配检查（可用矩形、trim/bleed/safe、超限原因）
+├── src/productionMarks.js # 双面生产标记（裁切线 / 折线标 / 套准十字候选落位、避让出血框、背面翻转变换、省略原因）
 ├── src/verification.js  # 试印核验（观察校验、四种装订×翻转重算比对、候选排序与结论）
-├── public/              # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、试印核验面板、JSON 导出）
+├── public/              # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、生产标记、试印核验面板、JSON 导出）
 │   ├── index.html
 │   ├── app.js
 │   └── style.css
 ├── test/imposition.test.js
 ├── test/fitCheck.test.js
 ├── test/chapterSplit.test.js
+├── test/productionMarks.test.js
 ├── test/verification.test.js
 ├── test/api.test.js
+├── test/productionMarksApi.test.js
 ├── Dockerfile
 └── docker-compose.yml
 ```

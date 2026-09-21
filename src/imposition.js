@@ -1,6 +1,7 @@
 'use strict';
 
 const { parseFitInput, attachFit } = require('./fitCheck');
+const { parseProductionMarksInput, attachProductionMarks } = require('./productionMarks');
 const { attachVerification } = require('./verification');
 
 /**
@@ -217,8 +218,12 @@ function planChapterSignatures(totalPages, maxSheets, starts) {
  * @param {boolean} [input.chapterSplit]    是否启用章节优先分帖（缺省 false；与均衡分帖互斥）
  * @param {Array<number>} [input.chapterStarts] 章节起始页（严格递增，启用章节优先分帖时必填）
  * @param {Array<object>} [input.observations] 试印核验观察（1～12 条；缺省 / 空数组不启用核验）
+ * @param {boolean} [input.productionMarks] 是否启用双面生产标记（缺省 false；启用须同时启用适配检查）
+ * @param {number} [input.markLengthMm] 生产标记线长（mm，>0，缺省 5）
+ * @param {number} [input.markGapMm]   生产标记与出血框的间隙（mm，≥0，缺省 3）
  * @returns {object} 拼版结果（按帖 -> 张 -> 正/背面 -> 左/右页位；启用适配检查时每个页位带 fit；
- *                   启用试印核验时顶层带 verification：观察、候选评分与结论）
+ *                   启用试印核验时顶层带 verification：观察、候选评分与结论；
+ *                   启用双面生产标记时每张纸带 productionMarks，顶层带 productionMarks 汇总）
  */
 function computeImposition(input) {
   const totalPages = toInteger(input && input.totalPages);
@@ -230,6 +235,8 @@ function computeImposition(input) {
   const balancedSplit = input && input.balancedSplit === true;
   const chapterSplit = input && input.chapterSplit === true;
   const fit = parseFitInput(input || {});
+  // 双面生产标记依赖适配检查的出血框坐标；未启用适配检查却开启标记时此处报错（转 400）。
+  const productionMarks = parseProductionMarksInput(input || {}, fit.enabled);
 
   if (!Number.isInteger(totalPages) || totalPages < 1 || totalPages > MAX_TOTAL_PAGES) {
     throw new Error(`成品页数必须为 1 ~ ${MAX_TOTAL_PAGES} 的整数`);
@@ -439,7 +446,7 @@ function computeImposition(input) {
   const result = {
     meta: {
       app: 'saddle-stitch-imposition',
-      version: '1.6.0',
+      version: '1.7.0',
       generatedAt: new Date().toISOString(),
     },
     input: {
@@ -458,6 +465,9 @@ function computeImposition(input) {
       pageHeight: fit.pageHeight,
       bleedMm: fit.bleedMm,
       safetyMm: fit.safetyMm,
+      productionMarks: productionMarks.enabled,
+      markLengthMm: productionMarks.enabled ? productionMarks.markLengthMm : 0,
+      markGapMm: productionMarks.enabled ? productionMarks.markGapMm : 0,
     },
     pagesPerSignature: maxPagesPerSignature,
     signatureCount,
@@ -490,6 +500,10 @@ function computeImposition(input) {
   // 纸张规格与出血 / 安全区适配检查：逐页位计算并附加 slot.fit 与顶层 fit 汇总。
   // 未提供纸张 / 成品页尺寸时 fit.enabled = false，页码拼版与爬移结果完全不受影响。
   result.fit = attachFit(result, fit);
+
+  // 双面生产标记：逐张纸在正面坐标系落位后按长 / 短边翻转变换到背面，
+  // 保证正背套准；未启用时返回 { enabled: false }，页码拼版与适配结果完全不变。
+  result.productionMarks = attachProductionMarks(result, productionMarks);
 
   // 试印核验：observations 缺省 / 为空时返回 { enabled: false }，原流程完全不变；
   // 非法索引、重复观察等抛出明确错误（由调用方转为 400）。

@@ -411,6 +411,8 @@ function attachVerification(result, rawObservations, recompute) {
       pageHeight: 0,
       bleedMm: 0,
       safetyMm: 0,
+      // 核验只比对页码 / 空白 / 朝向，重算时关闭生产标记（其落位依赖适配检查的出血框）
+      productionMarks: false,
     });
     layouts.set(`${combo.binding}/${combo.flip}`, layout);
     return scoreCandidate(combo, layout, observations);

@@ -189,6 +189,16 @@ button.ghost:disabled {
   font-weight: 600;
 }
 
+.summary .chip.marks-ok {
+  background: #e6faf8;
+  color: #0f766e;
+}
+
+.summary .chip.marks-warn {
+  background: #fff4e0;
+  color: #b35900;
+}
+
 .slot-fit {
   margin-top: 2px;
   font-size: 12px;

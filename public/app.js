@@ -10,6 +10,14 @@ const ORIENTATION_TEXT = { upright: '正向', rotated: '倒置' };
 const VERIFY_STATUS_TEXT = { verified: '验证通过', undetermined: '无法判定', failed: '验证未通过' };
 const MAX_OBSERVATIONS = 12;
 
+/* 生产标记尺寸档位：线长（裁切线 / 折线标线段、套准十字半臂相关）与离出血框的间隙（mm）。 */
+const MARK_SIZE_PRESETS = {
+  small: { markLengthMm: 3, markGapMm: 2, label: '小（3 / 2mm）' },
+  standard: { markLengthMm: 5, markGapMm: 3, label: '标准（5 / 3mm）' },
+  large: { markLengthMm: 8, markGapMm: 4, label: '大（8 / 4mm）' },
+};
+const MARK_TYPE_TEXT = { crop: '裁切线', fold: '折线标', register: '套准十字' };
+
 const CANVAS_W = 1240;
 const CANVAS_H = 720;
 
@@ -27,6 +35,8 @@ const jsonPreview = document.getElementById('jsonPreview');
 const balancedSplitBox = document.getElementById('balancedSplit');
 const chapterSplitBox = document.getElementById('chapterSplit');
 const chapterStartsInput = document.getElementById('chapterStarts');
+const productionMarksBox = document.getElementById('productionMarks');
+const markSizeSelect = document.getElementById('markSize');
 const obsForm = document.getElementById('obsForm');
 const obsSignature = document.getElementById('obsSignature');
 const obsSheet = document.getElementById('obsSheet');
@@ -121,6 +131,16 @@ form.addEventListener('submit', async (event) => {
     bleedMm: Number(document.getElementById('bleedMm').value),
     safetyMm: Number(document.getElementById('safetyMm').value),
   };
+  // 双面生产标记（依赖适配检查；未勾选时仅回传开关 false，响应与旧版本一致）
+  const productionMarks = productionMarksBox.checked;
+  if (productionMarks) {
+    const preset = MARK_SIZE_PRESETS[markSizeSelect.value] || MARK_SIZE_PRESETS.standard;
+    payload.productionMarks = true;
+    payload.markLengthMm = preset.markLengthMm;
+    payload.markGapMm = preset.markGapMm;
+  } else {
+    payload.productionMarks = false;
+  }
   // 已录入观察时随生成一并核验；无观察时请求体与原流程完全一致
   const requestBody = state.observations.length ? { ...payload, observations: observationPayload() } : payload;
 
@@ -269,6 +289,14 @@ function renderSummary() {
         : { text: `适配检查：${r.fit.failCount} / ${r.fit.totalSlots} 页位不适配`, cls: 'fit-fail' }
     );
   }
+  if (r.productionMarks && r.productionMarks.enabled) {
+    const pm = r.productionMarks;
+    chips.push(
+      pm.omittedMarks === 0
+        ? { text: `生产标记：${pm.placedMarks} 个全部落位（线长 ${formatMm(pm.markLengthMm)} · 间隙 ${formatMm(pm.markGapMm)} mm）`, cls: 'marks-ok' }
+        : { text: `生产标记：已落位 ${pm.placedMarks} / ${pm.totalMarks}，省略 ${pm.omittedMarks} 个`, cls: 'marks-warn' }
+    );
+  }
   summaryBox.innerHTML = '';
   chips.forEach(({ text, cls }) => {
     const span = document.createElement('span');
@@ -293,6 +321,11 @@ function sheetHasFitFail(sheet) {
   return sheetSlots(sheet).some((s) => s.fit && !s.fit.ok);
 }
 
+/** 该张纸被省略的生产标记列表（未启用时为空数组）。 */
+function sheetOmittedMarks(sheet) {
+  return sheet.productionMarks ? sheet.productionMarks.omitted : [];
+}
+
 function renderSheetNav() {
   const r = state.result;
   const fitOn = r.fit && r.fit.enabled;
@@ -303,7 +336,8 @@ function renderSheetNav() {
     const opt = document.createElement('option');
     opt.value = String(i);
     const chapterNote = sigChaptersText(sig) ? ` · ${sigChaptersText(sig)}` : '';
-    opt.textContent = `第 ${sig.index} 帖（${sig.actualSheetCount} 张${chapterNote}） · 第 ${sheet.index} 张${fitOn && sheetHasFitFail(sheet) ? ' ⚠' : ''}`;
+    const omitNote = sheetOmittedMarks(sheet).length > 0 ? ` · 标记省略 ${sheetOmittedMarks(sheet).length}` : '';
+    opt.textContent = `第 ${sig.index} 帖（${sig.actualSheetCount} 张${chapterNote}） · 第 ${sheet.index} 张${fitOn && sheetHasFitFail(sheet) ? ' ⚠' : ''}${omitNote}`;
     sheetSelect.appendChild(opt);
   });
   sheetSelect.value = String(state.idx);
@@ -377,7 +411,14 @@ function renderTable() {
           tr.appendChild(td);
         });
         const tdNote = document.createElement('td');
-        tdNote.textContent = `${note}；${creepNote}`;
+        let noteText = `${note}；${creepNote}`;
+        if (name === '正面' && sheet.productionMarks) {
+          const pm = sheet.productionMarks;
+          noteText += pm.omittedCount === 0
+            ? `；生产标记 ${pm.placedCount} 个全部落位`
+            : `；生产标记落位 ${pm.placedCount} 个、省略 ${pm.omittedCount} 个（${pm.omitted.map((o) => o.reason).join('；')}）`;
+        }
+        tdNote.textContent = noteText;
         tr.appendChild(tdNote);
         tableBody.appendChild(tr);
       });
@@ -768,6 +809,7 @@ function draw() {
   const sheet = sig.sheets[pos.shi];
   const { flip, binding } = r.input;
   const fitOn = r.fit && r.fit.enabled;
+  const marksOn = r.productionMarks && r.productionMarks.enabled && !!sheet.productionMarks;
 
   // 当前张全部超限原因（用于底部说明，并据此加高画布）
   const violations = [];
@@ -786,7 +828,7 @@ function draw() {
       });
     });
   }
-  const noteLines = buildNotes(r.input, r.creep, fitOn ? r.fit : null, violations);
+  const noteLines = buildNotes(r.input, r.creep, fitOn ? r.fit : null, violations, sheet);
   const canvasH = Math.max(CANVAS_H, 540 + noteLines.length * 25 + 16);
   const ctx = setupCanvas(canvasH);
 
@@ -838,10 +880,27 @@ function draw() {
       );
     }
   }
+  if (marksOn) {
+    const pm = sheet.productionMarks;
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    if (pm.omittedCount === 0) {
+      ctx.fillStyle = '#0f766e';
+      ctx.fillText(
+        `✓ 双面生产标记：本张 ${pm.placedCount} 个标记全部落位（线长 ${formatMm(r.productionMarks.markLengthMm)} · 间隙 ${formatMm(r.productionMarks.markGapMm)} mm），背面按${FLIP_TEXT[flip]}坐标变换，正背套准`,
+        40, 118
+      );
+    } else {
+      ctx.fillStyle = '#b35900';
+      ctx.fillText(
+        `⚠ 双面生产标记：本张落位 ${pm.placedCount} 个、省略 ${pm.omittedCount} 个（${pm.omitted.map((o) => MARK_TYPE_TEXT[o.type]).join('、')}），省略原因详见下方说明`,
+        40, 118
+      );
+    }
+  }
 
   const sheetW = 460;
   const sheetH = 340;
-  const top = 136;
+  const top = marksOn ? 150 : 136;
   const frontRect = { x: 70, y: top, w: sheetW, h: sheetH };
   const backRect = { x: 710, y: top, w: sheetW, h: sheetH };
 
@@ -867,6 +926,11 @@ function draw() {
 
   drawSheet(ctx, frontRect, sheet.front, { rotated: false, isBack: false, ...drawOpts });
   drawSheet(ctx, backRect, sheet.back, { rotated: flip === 'long', isBack: true, ...drawOpts });
+  if (marksOn) {
+    // 生产标记按纸张 mm 坐标等比映射到画布矩形；背面坐标已由服务端完成翻转变换
+    drawProductionMarks(ctx, frontRect, sheet.productionMarks.front, r.fit);
+    drawProductionMarks(ctx, backRect, sheet.productionMarks.back, r.fit);
+  }
   drawFlipDiagram(ctx, { x: 530, y: top, w: 180, h: sheetH }, flip);
 
   // 核验定位高亮：点击差异 / 观察 / 建议后，在当前张对应页位画紫色描边
@@ -1098,9 +1162,32 @@ function drawSlot(ctx, rect, slot, opts, posName) {
   ctx.restore();
 }
 
+/**
+ * 双面生产标记画布叠加：标记坐标为纸张坐标系（mm），按 fit 的纸张宽高
+ * 等比映射到纸张画布矩形。裁切线 = 深灰、折线标 = 品红、套准十字 = 青色。
+ */
+function drawProductionMarks(ctx, sheetRect, marks, fit) {
+  if (!marks || !marks.length || !fit) return;
+  const sx = sheetRect.w / fit.paperWidth;
+  const sy = sheetRect.h / fit.paperHeight;
+  const colors = { crop: '#343a46', fold: '#d6336c', register: '#0f766e' };
+  ctx.save();
+  ctx.lineCap = 'round';
+  marks.forEach((m) => {
+    ctx.strokeStyle = colors[m.type] || '#343a46';
+    ctx.lineWidth = m.type === 'register' ? 1.8 : 1.4;
+    m.segments.forEach((s) => {
+      ctx.beginPath();
+      ctx.moveTo(sheetRect.x + s.x1 * sx, sheetRect.y + s.y1 * sy);
+      ctx.lineTo(sheetRect.x + s.x2 * sx, sheetRect.y + s.y2 * sy);
+      ctx.stroke();
+    });
+  });
+  ctx.restore();
+}
+
 /** 裁切角线。 */
-function drawCropMarks(ctx, rect) {
-  const len = 14;
+function drawCropMarks(ctx, rect) {  const len = 14;
   const gap = 5;
   const corners = [
     [rect.x, rect.y, -1, -1],
@@ -1228,8 +1315,8 @@ function drawFlipDiagram(ctx, zone, flip) {
   ctx.restore();
 }
 
-/** 组装底部图例与规则说明行（含适配检查结果）。 */
-function buildNotes(input, creep, fit, violations) {
+/** 组装底部图例与规则说明行（含适配检查、生产标记结果）。 */
+function buildNotes(input, creep, fit, violations, sheet) {
   const lines = [
     { text: '图例：蓝色数字 = 成品页码；灰色斜纹 = 自动补齐的空白页；红色虚线 = 对折线（订口）；灰色小角线 = 裁切标记。' },
     {
@@ -1282,6 +1369,24 @@ function buildNotes(input, creep, fit, violations) {
       violations.slice(0, 5).forEach((v) => lines.push({ text: `⚠ ${v}`, color: '#c92a2a' }));
       if (violations.length > 5) {
         lines.push({ text: `…其余 ${violations.length - 5} 项超限详见下方拼版清单。`, color: '#c92a2a' });
+      }
+    }
+  }
+  const pm = sheet && sheet.productionMarks;
+  if (pm) {
+    lines.push({
+      text: `双面生产标记：深灰线段 = 裁切线，品红短线 = 折线标（对折中线），青色十字 = 套准十字；标记按固定候选位置顺序尝试，线段须完整落在纸内、避开两侧出血框且不与已放置标记相交。背面标记按${input.flip === 'long' ? '长边翻转 (x, y) → (x, H − y)' : '短边翻转 (x, y) → (W − x, y)'}变换到同一物理位置。`,
+      color: '#0b5c55',
+    });
+    if (pm.omitted.length === 0) {
+      lines.push({ text: `✓ 本张 ${pm.placedCount} 个生产标记全部落位；爬移或尺寸变化后同步重算。`, color: '#0f766e' });
+    } else {
+      // 逐张省略提示：每个被省略标记的汇总原因
+      pm.omitted.slice(0, 4).forEach((o) => {
+        lines.push({ text: `⚠ 已省略「${o.name}」：${o.reason}`, color: '#b35900' });
+      });
+      if (pm.omitted.length > 4) {
+        lines.push({ text: `…其余 ${pm.omitted.length - 4} 个省略标记及逐候选原因见导出 JSON。`, color: '#b35900' });
       }
     }
   }

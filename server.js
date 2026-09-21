@@ -20,10 +20,12 @@ app.get('/api/health', (req, res) => {
  *   paperThickness?, maxCompensation?,                       // 可选，纸张厚度与爬移最大补偿量（mm，缺省/为 0 不补偿）
  *   balancedSplit?, chapterSplit?, chapterStarts?,           // 可选，分帖模式（均衡 / 章节优先，互斥）
  *   paperWidth?, paperHeight?, pageWidth?, pageHeight?, bleedMm?, safetyMm?, // 可选，适配检查
+ *   productionMarks?, markLengthMm?, markGapMm?,                            // 可选，双面生产标记（须启用适配检查）
  *   observations?                                            // 可选，试印核验观察（1～12 条；缺省/空数组不启用）
  * }
  * 响应：拼版清单 JSON（与前端「导出拼版清单 JSON」内容一致）；
- * 启用试印核验时顶层带 verification（观察、四种装订×翻转候选的评分与结论）。
+ * 启用试印核验时顶层带 verification（观察、四种装订×翻转候选的评分与结论）；
+ * 启用双面生产标记时每张纸带 productionMarks（正 / 背面标记坐标与逐标记省略原因）。
  */
 app.post('/api/impose', (req, res) => {
   try {
